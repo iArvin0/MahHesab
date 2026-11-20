@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+    volumes:
+      - ledger:/data
+    restart: unless-stopped
+
+volumes:
+  ledger:
