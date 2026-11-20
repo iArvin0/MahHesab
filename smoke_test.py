@@ -4,7 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from finance import Ledger, quick_entry, amount, period_range, timestamp, display_time
-from bot import FinanceBot, build_application, callback, show_history_view
+from telegram.error import TimedOut
+from telegram.ext import ApplicationHandlerStop
+
+from bot import FinanceBot, allowed_user_ids, build_application, callback, reject_unlisted, show_history_view
 
 for message, kind, expected in [
     ("قهوه ۱۲۰ هزار", "expense", 120000), ("حقوق ۲۵ میلیون", "income", 25000000),
@@ -79,6 +82,30 @@ async def exercise(db):
     db.delete(7, entry["id"])
     assert db.accounts(7)[0]["balance"] == 90000
     assert build_application("123456:offline-test", db).handlers
+    allowed = allowed_user_ids("7, 9")
+    assert allowed == {7, 9} and not allowed_user_ids("")
+    try:
+        allowed_user_ids("7, invalid")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Invalid access policy was accepted")
+    restricted = build_application("123456:offline-test", db, allowed_users=allowed)
+    assert -1 in restricted.handlers
+    policy_context = SimpleNamespace(application=restricted)
+    notice = AsyncMock(side_effect=TimedOut())
+    restricted_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=8), callback_query=SimpleNamespace(answer=notice),
+    )
+    try:
+        await reject_unlisted(restricted_update, policy_context)
+    except ApplicationHandlerStop:
+        pass
+    else:
+        raise AssertionError("Restricted update was not stopped")
+    restricted_update.effective_user.id = 7
+    await reject_unlisted(restricted_update, policy_context)
+    assert notice.await_count == 1
     assert len(db.entries(7, kind="expense", search="TEA")) == 1
     assert not db.entries(7, kind="income", search="tea")
     db.add_account(8, "Cash", 0)

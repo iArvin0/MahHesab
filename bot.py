@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import BadRequest, InvalidToken, NetworkError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import (
+    Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler,
+    MessageHandler, TypeHandler, filters,
+)
 
 from finance import CATEGORIES, Ledger, amount, display_time, now, period_range, quick_entry, timestamp
 
@@ -683,13 +686,40 @@ async def error_handler(update, context):
             logging.getLogger(__name__).warning("Could not deliver the error message")
 
 
-def build_application(token, ledger):
+def allowed_user_ids(value):
+    if not value.strip():
+        return frozenset()
+    ids = [item.strip() for item in value.split(",")]
+    if any(not item.isascii() or not item.isdecimal() or not 1 <= int(item) < 2**63 for item in ids):
+        raise ValueError("MAHHESAB_ALLOWED_USER_IDS must contain comma-separated positive Telegram user IDs.")
+    return frozenset(map(int, ids))
+
+
+async def reject_unlisted(update, context):
+    user = update.effective_user
+    if user and user.id in context.application.bot_data["allowed_users"]:
+        return
+    message = "دسترسی به این بات محدود است. This bot is private."
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(message, show_alert=True)
+        elif update.effective_chat and update.effective_chat.type == "private" and update.effective_message:
+            await update.effective_message.reply_text(message)
+    except Exception:
+        logging.getLogger(__name__).warning("Could not deliver the private bot notice")
+    raise ApplicationHandlerStop
+
+
+def build_application(token, ledger, *, allowed_users=None):
     app = (
         Application.builder().token(token).concurrent_updates(False)
         .connect_timeout(20).read_timeout(20)
         .get_updates_connect_timeout(20).build()
     )
     app.bot_data["ledger"] = ledger
+    if allowed_users:
+        app.bot_data["allowed_users"] = allowed_users
+        app.add_handler(TypeHandler(Update, reject_unlisted), group=-1)
     private = filters.ChatType.PRIVATE
     app.add_handler(CommandHandler("start", start, filters=private))
     app.add_handler(CommandHandler(["menu", "cancel"], home, filters=private))
@@ -700,12 +730,29 @@ def build_application(token, ledger):
     return app
 
 
+def database_path():
+    configured = os.environ.get("MAHHESAB_DB") or os.environ.get("KHARJBAN_DB")
+    if configured:
+        return Path(configured)
+    directory = Path("/data") if os.environ.get("MAHHESAB_CONTAINER") == "1" else Path.cwd()
+    current = directory / "mahhesab.sqlite3"
+    previous = directory / "kharjban.sqlite3"
+    # Keep using an existing ledger, including its SQLite sidecar files.
+    return previous if not current.exists() and previous.is_file() else current
+
+
 def main():
     load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token or token == "YOUR_BOTFATHER_TOKEN":
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env or in the environment before starting.")
-    path = Path(os.environ.get("KHARJBAN_DB") or "kharjban.sqlite3")
+    try:
+        allowed_users = allowed_user_ids(os.environ.get("MAHHESAB_ALLOWED_USER_IDS", ""))
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    if os.name == "posix":
+        os.umask(0o077)
+    path = database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -714,7 +761,7 @@ def main():
         lambda record: not (record.exc_info and isinstance(record.exc_info[1], InvalidToken))
     )
     try:
-        build_application(token, Ledger(path)).run_polling(
+        build_application(token, Ledger(path), allowed_users=allowed_users).run_polling(
             allowed_updates=["message", "callback_query"], bootstrap_retries=2,
         )
     except InvalidToken:

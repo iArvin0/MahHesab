@@ -3,9 +3,14 @@ services:
     build: .
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      MAHHESAB_ALLOWED_USER_IDS: ${MAHHESAB_ALLOWED_USER_IDS:-}
     volumes:
       - ledger:/data
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   ledger:
